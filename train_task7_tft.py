@@ -1,11 +1,13 @@
 import pandas as pd
 import numpy as np
 
-import pytorch_lightning as pl
-from pytorch_lightning import LightningDataModule, Trainer
+import lightning.pytorch as pl
+from lightning.pytorch import LightningDataModule, Trainer
+from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 
 from pytorch_forecasting import TimeSeriesDataSet
 from pytorch_forecasting.models import TemporalFusionTransformer
+from pytorch_forecasting.metrics import QuantileLoss
 
 class WeatherDataModule(LightningDataModule):
     def __init__(self, batch_size: int = 64, num_workers: int = 4, val_fraction: float = 0.1):
@@ -16,8 +18,8 @@ class WeatherDataModule(LightningDataModule):
 
     def prepare_data(self) -> None:
         # 1) read raw train & test
-        raw_train = pd.read_csv("experiments/task7/weather_train.csv")
-        self.test_df = pd.read_csv("experiments/task7/weather_test.csv")
+        raw_train = pd.read_csv("data/weather_train.csv")
+        self.test_df = pd.read_csv("data/weather_test.csv")
 
         # 2) convert to categories
         for df in (raw_train, self.test_df):
@@ -45,7 +47,7 @@ class WeatherDataModule(LightningDataModule):
                 time_idx="time_idx",
                 target=["humid_obs", "degC_obs", "mmHg_obs"],
                 group_ids=["segment_id"],
-                max_encoder_length=168,
+                max_encoder_length=336,
                 min_encoder_length=72,
                 min_prediction_idx=73,
                 max_prediction_length=24,
@@ -94,27 +96,47 @@ class WeatherDataModule(LightningDataModule):
 
 
 if __name__ == "__main__":
-    dm = WeatherDataModule(batch_size=64, num_workers=4, val_fraction=0.1)
+    dm = WeatherDataModule(batch_size=256, num_workers=4, val_fraction=0.1)
     dm.prepare_data()
     dm.setup()
+
+    early_stop = EarlyStopping(
+        monitor="val_loss",   # or whatever metric you care about
+        patience=30,          # stop after 30 epochs with no improvement
+        mode="min",           # smaller loss is better
+        verbose=True
+    )
+
+    checkpoint_cb = ModelCheckpoint(
+        monitor="val_loss",
+        mode="min",
+        save_top_k=5,
+        dirpath="checkpoints",
+        filename="best-tft-{epoch:02d}-{val_loss:.4f}"
+    )
+
+    lr_monitor = LearningRateMonitor(logging_interval="epoch")
 
     model = TemporalFusionTransformer.from_dataset(
         dm.train_ds,
         learning_rate=1e-3,
-        hidden_size=16,
-        attention_head_size=1,
+        hidden_size=256,
+        lstm_layers=3,
+        attention_head_size=16,
         dropout=0.1,
-        hidden_continuous_size=8,
-        output_size=[1,1,1],
+        hidden_continuous_size=128,
+        loss=QuantileLoss(quantiles=(0.1, 0.25, 0.5, 0.9)),
+        output_size=[4, 4, 4],
     )
 
     trainer = Trainer(
         accelerator="gpu",
         devices=1,
         precision=32,
-        max_epochs=100,
-        min_epochs=10,
-        overfit_batches=0.5,
+        max_epochs=200,
+        min_epochs=30,
+        callbacks=[early_stop, checkpoint_cb, lr_monitor],
+        # overfit_batches=32,
     )
 
     trainer.fit(model, datamodule=dm)

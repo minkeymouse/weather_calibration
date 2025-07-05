@@ -1,13 +1,13 @@
 import pandas as pd
 import numpy as np
 
-df_obs = pd.read_csv("./experiments/task7/recorded_weather.csv",
+df_obs = pd.read_csv("./data/recorded_weather.csv",
                      header=0, names=["date", "humid_obs", "degC_obs", "mmHg_obs"],
                      parse_dates=["date"])
 print(df_obs.head())
 print("total rows:", len(df_obs))
 
-df_fcst = pd.read_csv("./experiments/task7/forecasted_weather.csv",
+df_fcst = pd.read_csv("./data/forecasted_weather.csv",
                       header=0, names=["date", "sunlight_fcst", "humid_fcst", "abs_humid_fcst", "degC_fcst", "hPa_fcst"],
                       parse_dates=["date"])
 print(df_fcst.head())
@@ -63,8 +63,8 @@ test_segments = [6, 7, 8]
 test_df  = df[df["segment_id"].isin(test_segments)].reset_index(drop=True)
 train_df = df[~df["segment_id"].isin(test_segments)].reset_index(drop=True)
 
-train_df.to_csv("./experiments/task7/weather_train.csv", index=False)
-test_df.to_csv( "./experiments/task7/weather_test.csv",  index=False)
+train_df.to_csv("./data/weather_train.csv", index=False)
+test_df.to_csv( "./data/weather_test.csv",  index=False)
 
 print("train segments:", train_df["segment_id"].unique())
 print("test  segments:", test_df["segment_id"].unique())
