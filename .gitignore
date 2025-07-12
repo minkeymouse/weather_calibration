@@ -1,2 +1,4 @@
 *.csv
 lightning_logs/
+checkpoints/
+data/
