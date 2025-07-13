@@ -27,3 +27,7 @@ data/
 .cpython-312.pyc
 
 __pycache__/
+
+logs/
+
+base_ckpts/

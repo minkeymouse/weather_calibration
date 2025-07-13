@@ -84,22 +84,6 @@ TFT_PARAMS = dict(
     log_interval=1,
 )
 
-TIDE_PARAMS = dict(
-    output_chunk_length = MAX_PREDICTION_LENGTH,
-    input_chunk_length = MAX_ENCODER_LENGTH,
-    num_encoder_layers = 10,
-    num_decoder_layers = 10,
-    decoder_output_dim = 64,
-    hidden_size = 1024,
-    temporal_width_future = 16,
-    temporal_hidden_size_future = 64,
-    temporal_decoder_hidden = 64,
-    use_layer_norm = True,
-    dropout = 0.1,
-    learning_rate = 1e-3,
-    logging_metrics = ModuleList([SMAPE(), MAE(), RMSE(), MAPE(), MASE()]),
-)
-
 TXR_PARAMS = dict(
         context_length = MAX_ENCODER_LENGTH,
         prediction_length = MAX_PREDICTION_LENGTH,
