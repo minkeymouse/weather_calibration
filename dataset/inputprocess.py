@@ -8,7 +8,7 @@ df_obs = pd.read_csv(
 )
 
 df_fcst = pd.read_csv(
-    "input/obs.csv",
+    "input/fcst.csv",
     encoding="utf-8",
     parse_dates=["기상관측일시"],
 )
