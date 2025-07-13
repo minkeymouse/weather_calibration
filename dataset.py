@@ -68,7 +68,9 @@ class ForecastingDataModule(pl.LightningDataModule):
 
             # 2) validation_ds: windows whose FIRST time ≥ cutoff+1 and LAST ≤ cutoff+window+(k-1)
             val_start = self.cutoff + 1
+            max_train_idx = self.train_df["time_idx"].max()
             val_end   = self.cutoff + window + (k - 1)
+            val_end = min(val_end, max_train_idx - cfg.MAX_PREDICTION_LENGTH)
             self.validation_ds = self.full_ds.filter(
                 lambda idx: (idx.time_idx_first >= val_start)
                          & (idx.time_idx_last  <= val_end)
@@ -93,7 +95,7 @@ class ForecastingDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             shuffle=True,
-            drop_last=True,
+            drop_last=False,
             pin_memory=False,
             persistent_workers=True,
         )

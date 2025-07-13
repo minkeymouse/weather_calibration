@@ -1,12 +1,15 @@
+import torch
 from torch.nn import ModuleList
 from pytorch_forecasting.metrics import QuantileLoss, SMAPE, MAE, RMSE, MAPE, MASE
 
 # Main params
 TRAIN_DF = "data/train.csv"
 TEST_DF = "data/test.csv"
-BATCH_SIZE = 512
-NUM_WORKERS = 4
+BATCH_SIZE = 256
+NUM_WORKERS = 2
 SEED = 1234
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # DATASET HYPERPARAMS
 TIME_IDX = "time_idx"
@@ -56,78 +59,60 @@ MAX_PREDICTION_LENGTH = 24
 MIN_PREDICTION_LENGTH = 24
 
 # Datamodule params
-WINDOW_EPOCH_ADVANCE = 12
+WINDOW_EPOCH_ADVANCE = 24
 VALIDATION_WINDOW_COUNT = 100
 INITIAL_CUTOFF = MAX_ENCODER_LENGTH + 100
 
 # Trainer params
-MAX_EPOCHS      = 15000
-PATIENCE        = 150
-LOG_INTERVAL    = 10
+MAX_EPOCHS      = 520
+PATIENCE        = 120
+LOG_INTERVAL    = 1
 GRAD_CLIP_VAL   = 0.1
 
 TFT_PARAMS = dict(
     # learning
     learning_rate=1e-3,
     reduce_on_plateau_patience=4,
-    # architecture
     hidden_size=256,
     lstm_layers=2,
-    attention_head_size=64,
+    attention_head_size=128,
     dropout=0.05,
-    hidden_continuous_size=128,
+    hidden_continuous_size=256,
     output_size=[1, 1, 1],
     loss=QuantileLoss(quantiles=[0.5]),
     logging_metrics=ModuleList([SMAPE(), MAE(), RMSE(), MAPE()]),
-    log_interval=10,
+    log_interval=1,
 )
 
 TIDE_PARAMS = dict(
-    # optimizer
-    learning_rate=1e-3,
-    # encoder / decoder depths
-    num_encoder_layers=2,
-    num_decoder_layers=2,
-    # widths
-    hidden_size=128,
-    decoder_output_dim=16,
-    # future‐covariate projections
-    temporal_width_future=4,
-    temporal_hidden_size_future=32,
-    # temporal decoder
-    temporal_decoder_hidden=32,
-    # regularization
-    use_layer_norm=False,
-    dropout=0.1,
-    # multi‐target output
-    output_size=[1, 1, 1],
-    # loss & logging
-    loss=QuantileLoss(quantiles=[0.5]),
-    logging_metrics=ModuleList([SMAPE(), MAE(), RMSE(), MAPE(), MASE()]),
-    # how often to log internally
-    log_interval=10,
+    output_chunk_length = MAX_PREDICTION_LENGTH,
+    input_chunk_length = MAX_ENCODER_LENGTH,
+    num_encoder_layers = 10,
+    num_decoder_layers = 10,
+    decoder_output_dim = 64,
+    hidden_size = 1024,
+    temporal_width_future = 16,
+    temporal_hidden_size_future = 64,
+    temporal_decoder_hidden = 64,
+    use_layer_norm = True,
+    dropout = 0.1,
+    learning_rate = 1e-3,
+    logging_metrics = ModuleList([SMAPE(), MAE(), RMSE(), MAPE(), MASE()]),
 )
 
 TXR_PARAMS = dict(
-    # optimizer
-    learning_rate=1e-3,
-    # transformer backbone
-    hidden_size=256,
-    n_heads=4,
-    e_layers=2,           # number of encoder layers
-    d_ff=1024,            # feed-forward inner dimension
-    dropout=0.2,
-    activation="relu",
-    # patching/exogenous settings
-    patch_length=16,
-    factor=5,
-    embed_type="fixed",   # fixed time embeddings
-    freq="h",             # hourly data
-    # output
-    output_size=[1, 1, 1],               # one forecast per target
-    # loss & metrics
-    loss=QuantileLoss(quantiles=[0.5]),
-    logging_metrics=ModuleList([SMAPE(), MAE(), RMSE(), MAPE()]),
-    # how often to log internally
-    log_interval=10,
+        context_length = MAX_ENCODER_LENGTH,
+        prediction_length = MAX_PREDICTION_LENGTH,
+        task_name = "long_term_forecast",
+        features = "M",
+        hidden_size = 512,
+        n_heads = 8,
+        e_layers = 4,
+        d_ff = 1024,
+        dropout = 0.2,
+        patch_length = 6,
+        learning_rate  = 3e-4,    # lower LR for stability on larger nets
+        weight_decay  = 1e-5,    # L2 regularization
+        reduce_on_plateau_patience = 5,       # drop LR if no val gain
+        logging_metrics = ModuleList([SMAPE(), MAE(), RMSE(), MAPE()]),
 )
