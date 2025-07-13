@@ -1,4 +1,4 @@
-# predict.py
+#!/usr/bin/env python3
 from __future__ import annotations
 import argparse
 import json
@@ -35,7 +35,6 @@ warnings.filterwarnings(
 TARGET_COLS = ["humid_obs", "degC_obs", "mmHg_obs"]
 METRIC_WEIGHTS = {"humid_obs": 0.3, "degC_obs": 0.5, "mmHg_obs": 0.2}
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Train (optional) & predict")
     parser.add_argument(
@@ -51,98 +50,88 @@ def parse_args():
     )
     return parser.parse_args()
 
-
 def main(online_train: bool = False, epochs: int = 10) -> None:
     # ── reproducibility & device ─────────────────────────────────────────────
     pl.seed_everything(cfg.SEED, workers=True)
-    accelerator = "gpu" if torch.cuda.is_available() else "cpu"
+    accelerator = "cuda" if torch.cuda.is_available() else "cpu"
     devices = 1
 
-    # ── data ─────────────────────────────────────────────────────────────────
+    # ── prepare data ──────────────────────────────────────────────────────────
     dm = PredictionDataModule()
     dm.prepare_data()
-    if online_train:
-        dm.setup(stage="fit")
-    dm.setup(stage="predict")
 
-    # ── model instantiation ─────────────────────────────────────────────────
+    # ── instantiate untrained models ──────────────────────────────────────────
+    # do this after prepare_data so full_ds exists
     tft = TemporalFusionTransformer.from_dataset(dm.full_ds, **cfg.TFT_PARAMS)
     txr = TimeXer.from_dataset(dm.full_ds, **cfg.TXR_PARAMS)
 
-    # ── callbacks & loggers ──────────────────────────────────────────────────
-    ckpt_tft = ModelCheckpoint(
-        dirpath="ckpts/tft",
-        filename="tft-{epoch:02d}-{val_loss:.4f}",
-        monitor="val_loss",
-        mode="min",
-        save_top_k=1,
-        save_last=True,
-    )
-    ckpt_txr = ModelCheckpoint(
-        dirpath="ckpts/txr",
-        filename="txr-{epoch:02d}-{val_loss:.4f}",
-        monitor="val_loss",
-        mode="min",
-        save_top_k=1,
-        save_last=True,
-    )
+    # ── set up loggers ────────────────────────────────────────────────────────
     logger_tft = CSVLogger(save_dir="logs/predict", name="tft")
     logger_txr = CSVLogger(save_dir="logs/predict", name="txr")
 
-    trainer_tft = Trainer(
-        accelerator=accelerator,
-        devices=devices,
-        precision=32,
-        default_root_dir="logs/predict",
-        logger=logger_tft,
-        callbacks=[
-            WalkForward(),
-            ckpt_tft,
-            LearningRateMonitor(),
-            EarlyStopping(monitor="val_loss", patience=cfg.PATIENCE),
-        ],
-        max_epochs=epochs,
-    )
-    trainer_txr = Trainer(
-        accelerator=accelerator,
-        devices=devices,
-        precision=32,
-        default_root_dir="logs/predict",
-        logger=logger_txr,
-        callbacks=[
-            WalkForward(),
-            ckpt_txr,
-            LearningRateMonitor(),
-            EarlyStopping(monitor="val_loss", patience=cfg.PATIENCE),
-        ],
-        max_epochs=epochs,
-    )
-
-    # ── train & validate (if requested) ──────────────────────────────────────
+    # ── training phase (if requested) ────────────────────────────────────────
     if online_train:
+        dm.setup(stage="fit")
+
+        ckpt_tft = ModelCheckpoint(
+            dirpath="ckpts/tft",
+            filename="tft-{epoch:02d}-{val_loss:.4f}",
+            monitor="val_loss",
+            mode="min",
+            save_top_k=1,
+            save_last=True,
+        )
+        ckpt_txr = ModelCheckpoint(
+            dirpath="ckpts/txr",
+            filename="txr-{epoch:02d}-{val_loss:.4f}",
+            monitor="val_loss",
+            mode="min",
+            save_top_k=1,
+            save_last=True,
+        )
+
+        trainer_tft = Trainer(
+            accelerator=accelerator,
+            devices=devices,
+            precision=32,
+            default_root_dir="logs/predict",
+            logger=logger_tft,
+            callbacks=[WalkForward(), ckpt_tft, LearningRateMonitor(),
+                       EarlyStopping(monitor="val_loss", patience=cfg.PATIENCE)],
+            max_epochs=epochs,
+        )
+        trainer_txr = Trainer(
+            accelerator=accelerator,
+            devices=devices,
+            precision=32,
+            default_root_dir="logs/predict",
+            logger=logger_txr,
+            callbacks=[WalkForward(), ckpt_txr, LearningRateMonitor(),
+                       EarlyStopping(monitor="val_loss", patience=cfg.PATIENCE)],
+            max_epochs=epochs,
+        )
+
         trainer_tft.fit(tft, datamodule=dm)
         trainer_txr.fit(txr, datamodule=dm)
         trainer_tft.validate(tft, datamodule=dm)
         trainer_txr.validate(txr, datamodule=dm)
 
-    # ── load best checkpoints for prediction ─────────────────────────────────
-    best_tft_ckpt = ckpt_tft.best_model_path
-    best_txr_ckpt = ckpt_txr.best_model_path
+        ckpt_tft_path = ckpt_tft.best_model_path
+        ckpt_txr_path = ckpt_txr.best_model_path
+    else:
+        ckpt_tft_path = "base_ckpts/tft_base.ckpt"
+        ckpt_txr_path = "base_ckpts/txr_base.ckpt"
 
-    tft_pred = TemporalFusionTransformer.from_dataset(dm.full_ds, **cfg.TFT_PARAMS)
-    txr_pred = TimeXer.from_dataset(dm.full_ds, **cfg.TXR_PARAMS)
+    # ── load checkpoint weights ───────────────────────────────────────────────
+    for model, ckpt_path in [(tft, ckpt_tft_path), (txr, ckpt_txr_path)]:
+        if not Path(ckpt_path).exists():
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+        ckpt_data = torch.load(ckpt_path, map_location="cpu")
+        model.load_state_dict(ckpt_data["state_dict"])
+        model.to(accelerator).eval()
 
-    ckpt_data = torch.load(best_tft_ckpt, map_location="cpu")
-    tft_pred.load_state_dict(ckpt_data["state_dict"])
-    tft_pred.to(accelerator).eval()
-
-    ckpt_data = torch.load(best_txr_ckpt, map_location="cpu")
-    txr_pred.load_state_dict(ckpt_data["state_dict"])
-    txr_pred.to(accelerator).eval()
-
-    # ── make predictions ─────────────────────────────────────────────────────
-    preds_tft = trainer_tft.predict(tft_pred, datamodule=dm)
-    preds_txr = trainer_txr.predict(txr_pred, datamodule=dm)
+    preds_tft = tft.predict(dm.full_ds)
+    preds_txr = trainer_txr.predict(txr, datamodule=dm)
 
     df_tft = pd.concat(preds_tft).reset_index(drop=True)
     df_txr = pd.concat(preds_txr).reset_index(drop=True)
@@ -162,29 +151,18 @@ def main(online_train: bool = False, epochs: int = 10) -> None:
     y_true = df_base[TARGET_COLS].reset_index(drop=True)
     y_pred = df_ens
 
-    rmse = {
-        col: np.sqrt(mean_squared_error(y_true[col], y_pred[col]))
-        for col in TARGET_COLS
-    }
-    mae = {
-        col: mean_absolute_error(y_true[col], y_pred[col])
-        for col in TARGET_COLS
-    }
+    rmse = {col: np.sqrt(mean_squared_error(y_true[col], y_pred[col]))
+            for col in TARGET_COLS}
+    mae  = {col: mean_absolute_error(y_true[col], y_pred[col])
+            for col in TARGET_COLS}
     srmse = sum(METRIC_WEIGHTS[c] * rmse[c] for c in TARGET_COLS)
-    smae = sum(METRIC_WEIGHTS[c] * mae[c] for c in TARGET_COLS)
+    smae  = sum(METRIC_WEIGHTS[c] * mae[c] for c in TARGET_COLS)
     saerror = float((srmse + smae) / 2)
 
-    metrics = {
-        "RMSE": rmse,
-        "MAE": mae,
-        "sRMSE": srmse,
-        "sMAE": smae,
-        "sAERROR": saerror,
-    }
+    metrics = {"RMSE": rmse, "MAE": mae, "sRMSE": srmse, "sMAE": smae, "sAERROR": saerror}
     with open("output/metrics.json", "w") as f:
         json.dump(metrics, f, indent=4)
 
-    # write plain-text summary
     with open("output/metrics.txt", "w") as f:
         for col in TARGET_COLS:
             f.write(f"{col} RMSE: {rmse[col]:.4f}, MAE: {mae[col]:.4f}\n")

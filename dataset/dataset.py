@@ -3,6 +3,7 @@ import pandas as pd
 import lightning.pytorch as pl
 from pytorch_forecasting import TimeSeriesDataSet
 import config as cfg
+import math
 
 class ForecastingDataModule(pl.LightningDataModule):
 
@@ -11,6 +12,7 @@ class ForecastingDataModule(pl.LightningDataModule):
         self.batch_size  = cfg.BATCH_SIZE
         self.num_workers = cfg.NUM_WORKERS
         self.window_step = cfg.WINDOW_EPOCH_ADVANCE
+        self.cutoff      = cfg.INITIAL_CUTOFF
 
     def prepare_data(self):
         # 1) seed + load CSV
@@ -128,28 +130,23 @@ class ForecastingDataModule(pl.LightningDataModule):
         print(f"📈 cutoff advanced to {self.cutoff}")
 
 
-
 class PredictionDataModule(pl.LightningDataModule):
-
     def __init__(self):
         super().__init__()
         self.batch_size  = cfg.BATCH_SIZE
         self.num_workers = cfg.NUM_WORKERS
-        self.window_step = cfg.WINDOW_EPOCH_ADVANCE
 
     def prepare_data(self):
-        # 1) seed + load CSV
         pl.seed_everything(cfg.SEED, workers=True)
         self.pred_df = pd.read_csv("input/base_data.csv", parse_dates=["date"])
 
-        # 2) cast known-future categoricals consistently across train & test
         for col in cfg.TIME_VARYING_KNOWN_CATEGORICALS:
             if col in self.pred_df:
-                combined = pd.concat([self.pred_df[col]]).astype(str).unique().tolist()
-                dtype = pd.CategoricalDtype(categories=combined)
+                cats = self.pred_df[col].astype(str).unique().tolist()
+                dtype = pd.CategoricalDtype(categories=cats)
                 self.pred_df[col] = self.pred_df[col].astype(str).astype(dtype)
 
-        # 3) build one full TimeSeriesDataSet for encoding/scaling
+        # 3) build full TimeSeriesDataSet for scaling/encoding
         self.full_ds = TimeSeriesDataSet(
             data=self.pred_df,
             time_idx=cfg.TIME_IDX,
@@ -173,34 +170,40 @@ class PredictionDataModule(pl.LightningDataModule):
         print(f"🔨 full_ds built, total windows: {len(self.full_ds)}")
 
     def setup(self, stage=None):
-        enc    = cfg.MAX_ENCODER_LENGTH
-        pred   = cfg.MAX_PREDICTION_LENGTH
+        enc = cfg.MAX_ENCODER_LENGTH
+        pred = cfg.MAX_PREDICTION_LENGTH
         window = enc + pred
-        k      = cfg.VALIDATION_WINDOW_COUNT
-        mask = self.pred_df[cfg.TARGET].isna().all(axis=1)
-        self.cutoff = self.pred_df.loc[mask, 'time_idx'].min()
+        k = cfg.VALIDATION_WINDOW_COUNT
 
-        # ── train+val split ────────────────────────────────────────────
+        mask = self.pred_df[cfg.TARGET].isna().all(axis=1)
+        self.cutoff = self.pred_df.loc[mask, "time_idx"].min()
+        self.train_val_split = math.floor(self.cutoff * 0.8)
         if stage in (None, "fit", "validate"):
             print("🛠 Building train_ds & validation_ds...")
-
-            # 1) train_ds: windows ending at or before cutoff+pred
-            cutoff_plus_pred = self.cutoff + pred
+            split_plus_pred = self.train_val_split + pred
             self.training_ds = self.full_ds.filter(
-                lambda idx: idx.time_idx_last <= cutoff_plus_pred
+                lambda idx: idx.time_idx_last <= split_plus_pred
             )
-            print(f"  train windows: {len(self.training_ds)}")
+            self.training_ds = self.training_ds(predict_mode = False)
 
-            # 2) validation_ds: windows whose FIRST time ≥ cutoff+1 and LAST ≤ cutoff+window+(k-1)
-            val_start = self.cutoff + 1
-            max_train_idx = self.pred_df["time_idx"].max()
-            val_end   = self.cutoff + window + (k - 1)
-            val_end = min(val_end, max_train_idx - cfg.MAX_PREDICTION_LENGTH)
+            val_start = self.train_val_split + 1
+            max_idx = self.pred_df["time_idx"].max()
+            val_end = min(self.cutoff + window + (k - 1),
+                          max_idx - cfg.MAX_PREDICTION_LENGTH)
             self.validation_ds = self.full_ds.filter(
                 lambda idx: (idx.time_idx_first >= val_start)
                          & (idx.time_idx_last  <= val_end)
             )
-            print(f"  val windows:   {len(self.validation_ds)}")
+            self.validation_ds = self.validation_ds(predict_mode = False)
+
+        if stage in (None, "predict"):
+            print("Building Prediction Dataset")
+            self.predict_ds = self.full_ds.from_dataset(
+                self.full_ds,
+                self.pred_df,
+                predict=False,
+                stop_randomization=True,
+            )
 
     def train_dataloader(self):
         return self.training_ds.to_dataloader(
@@ -223,9 +226,9 @@ class PredictionDataModule(pl.LightningDataModule):
             pin_memory=False,
             persistent_workers=True,
         )
-    
+
     def predict_dataloader(self):
-        return self.validation_ds.to_dataloader(
+        return self.full_ds.to_dataloader(
             train=False,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
@@ -234,8 +237,3 @@ class PredictionDataModule(pl.LightningDataModule):
             pin_memory=False,
             persistent_workers=True,
         )
-
-    def advance_window(self):
-        """Move the global cutoff forward before the next epoch."""
-        self.cutoff += self.window_step
-        print(f"📈 cutoff advanced to {self.cutoff}")
