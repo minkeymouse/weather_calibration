@@ -1,4 +1,3 @@
-from lightning.pytorch.utilities.types import EVAL_DATALOADERS
 import pandas as pd
 import lightning.pytorch as pl
 from pytorch_forecasting import TimeSeriesDataSet
@@ -130,6 +129,7 @@ class ForecastingDataModule(pl.LightningDataModule):
         print(f"📈 cutoff advanced to {self.cutoff}")
 
 
+
 class PredictionDataModule(pl.LightningDataModule):
     def __init__(self):
         super().__init__()
@@ -140,15 +140,38 @@ class PredictionDataModule(pl.LightningDataModule):
         pl.seed_everything(cfg.SEED, workers=True)
         self.pred_df = pd.read_csv("input/base_data.csv", parse_dates=["date"])
 
-        for col in cfg.TIME_VARYING_KNOWN_CATEGORICALS:
-            if col in self.pred_df:
-                cats = self.pred_df[col].astype(str).unique().tolist()
-                dtype = pd.CategoricalDtype(categories=cats)
-                self.pred_df[col] = self.pred_df[col].astype(str).astype(dtype)
+        # find where targets first go NaN
+        mask = self.pred_df[cfg.TARGET].isna().all(axis=1)
+        if not mask.any():
+            raise ValueError("No rows where all targets are NaN—check your base_data.csv")
+        first_nan_idx = int(self.pred_df.loc[mask, cfg.TIME_IDX].min())
+        self.cutoff        = first_nan_idx - 1
+        self.train_val_split = math.floor(self.cutoff * 0.8)
 
-        # 3) build full TimeSeriesDataSet for scaling/encoding
+        # fill targets (and any other decoder‐only columns if needed) in a separate df
+        self.df = self.pred_df.copy()
+        for t in cfg.TARGET:
+            self.df[t] = self.df[t].fillna(0.0)
+
+        for col in cfg.TIME_VARYING_UNKNOWN_REALS:
+            # if this is a diff or any other real feature that can have NaN
+            self.df[col] = self.df[col].fillna(0.0)
+
+        # cast known‐future categoricals
+        for col in cfg.TIME_VARYING_KNOWN_CATEGORICALS:
+            if col in self.df:
+                cats = self.df[col].astype(str).unique().tolist()
+                self.df[col] = (
+                    self.df[col]
+                    .astype(str)
+                    .astype(pd.CategoricalDtype(categories=cats))
+                )
+
+        # ── NEW: only use history (<= cutoff) to fit encoders/scalers ─────────────────
+        hist = self.df.loc[self.df[cfg.TIME_IDX] <= self.cutoff]
+
         self.full_ds = TimeSeriesDataSet(
-            data=self.pred_df,
+            data=hist,
             time_idx=cfg.TIME_IDX,
             target=cfg.TARGET,
             group_ids=cfg.GROUP_IDS,
@@ -167,43 +190,44 @@ class PredictionDataModule(pl.LightningDataModule):
             max_prediction_length=cfg.MAX_PREDICTION_LENGTH,
             min_prediction_length=cfg.MIN_PREDICTION_LENGTH,
         )
-        print(f"🔨 full_ds built, total windows: {len(self.full_ds)}")
+        print(f"🔨 full_ds built on history, total windows: {len(self.full_ds)}")
 
     def setup(self, stage=None):
-        enc = cfg.MAX_ENCODER_LENGTH
-        pred = cfg.MAX_PREDICTION_LENGTH
-        window = enc + pred
-        k = cfg.VALIDATION_WINDOW_COUNT
-
-        mask = self.pred_df[cfg.TARGET].isna().all(axis=1)
-        self.cutoff = self.pred_df.loc[mask, "time_idx"].min()
-        self.train_val_split = math.floor(self.cutoff * 0.8)
         if stage in (None, "fit", "validate"):
             print("🛠 Building train_ds & validation_ds...")
-            split_plus_pred = self.train_val_split + pred
-            self.training_ds = self.full_ds.filter(
-                lambda idx: idx.time_idx_last <= split_plus_pred
+            # train on rows ≤ train_val_split
+            train_mask = self.df[cfg.TIME_IDX] <= self.train_val_split
+            self.training_ds = TimeSeriesDataSet.from_dataset(
+                self.full_ds,
+                data=self.df.loc[train_mask],
+                stop_randomization=False,
+                predict=False,
             )
-            self.training_ds = self.training_ds(predict_mode = False)
+            print(f"  train windows: {len(self.training_ds)}")
 
-            val_start = self.train_val_split + 1
-            max_idx = self.pred_df["time_idx"].max()
-            val_end = min(self.cutoff + window + (k - 1),
-                          max_idx - cfg.MAX_PREDICTION_LENGTH)
-            self.validation_ds = self.full_ds.filter(
-                lambda idx: (idx.time_idx_first >= val_start)
-                         & (idx.time_idx_last  <= val_end)
+            # val on rows train_val_split+1 … cutoff
+            val_mask = (
+                (self.df[cfg.TIME_IDX] >  self.train_val_split) &
+                (self.df[cfg.TIME_IDX] <= self.cutoff)
             )
-            self.validation_ds = self.validation_ds(predict_mode = False)
+            self.validation_ds = TimeSeriesDataSet.from_dataset(
+                self.full_ds,
+                data=self.df.loc[val_mask],
+                stop_randomization=True,
+                predict=False,
+            )
+            print(f"  val windows:   {len(self.validation_ds)}")
 
         if stage in (None, "predict"):
-            print("Building Prediction Dataset")
-            self.predict_ds = self.full_ds.from_dataset(
+            print("🛠 Building predict_ds...")
+            # inference: one window per series, using all rows (history+future cov)
+            self.predict_ds = TimeSeriesDataSet.from_dataset(
                 self.full_ds,
-                self.pred_df,
-                predict=False,
+                data=self.df,
                 stop_randomization=True,
+                predict=True,
             )
+            print(f"  predict windows: {len(self.predict_ds)}")
 
     def train_dataloader(self):
         return self.training_ds.to_dataloader(
@@ -228,7 +252,7 @@ class PredictionDataModule(pl.LightningDataModule):
         )
 
     def predict_dataloader(self):
-        return self.full_ds.to_dataloader(
+        return self.predict_ds.to_dataloader(
             train=False,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
