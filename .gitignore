@@ -31,3 +31,5 @@ __pycache__/
 logs/
 
 base_ckpts/
+
+artifacts/

@@ -1,4 +1,20 @@
-pytorch-forecasting
-numpy
-pandas
-matplotlib
+# requirements.txt
+# ---------------------------------------------------------------------------
+# Minimal, tested set of versions for the weather_calibration workflow
+# Works on Python 3.10 – 3.12 and Torch CUDA 11.x / 12.x wheels.
+# ---------------------------------------------------------------------------
+
+# --- Core scientific stack --------------------------------------------------
+numpy>=1.25.0,<2.0
+pandas>=2.2.0,<3.0
+
+# --- PyTorch & ecosystem ----------------------------------------------------
+# If you need a *specific* CUDA build, install the matching torch wheel first
+#   pip install torch==2.2.2+cu118 -f https://download.pytorch.org/whl/torch_stable.html
+torch>=2.2.0
+lightning>=2.2.1                 # (a.k.a. lightning.pytorch)
+pytorch-forecasting>=1.0.0       # first release compatible with Lightning 2
+
+# --- Optional utilities -----------------------------------------------------
+matplotlib>=3.8.0                # only used for quick plots / debugging
+scikit-learn>=1.4.0              # metrics in earlier experiments; safe to keep
